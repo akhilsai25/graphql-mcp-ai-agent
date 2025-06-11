@@ -6,7 +6,10 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI  # For chat models
 from pydantic import BaseModel
-from langchain.agents import initialize_agent, AgentType
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # --- Configuration ---
 # Your OpenAI API Key
@@ -14,29 +17,28 @@ from langchain.agents import initialize_agent, AgentType
 openai_api_key = os.getenv("OPENAI_API_KEY")
 
 # Custom Proxy Settings
-CUSTOM_PROXY_URL = f"${CUSTOM_PROXY_URL}"  # Replace with your URL
-SSL_CERTIFICATE_PATH = f"${SSL_CERT}"  # Replace with your certificate path
-PROXY_USERNAME = f"${PROXY_USERNAME}"
-PROXY_PASSWORD = f"${PROXY_PASSWORD}"
-MCP_SERVER_URL = f"${MCP_SERVER_URL}"
+CUSTOM_PROXY_URL = os.getenv("CUSTOM_PROXY_URL")  # Replace with your URL
+SSL_CERTIFICATE_PATH = os.getenv("SSL_CERT")  # Replace with your certificate path
+PROXY_USERNAME = os.getenv("PROXY_USERNAME")
+PROXY_PASSWORD = os.getenv("PROXY_PASSWORD")
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL")
+
+# --- FastAPI App Initialization ---
+app = FastAPI()
 
 # --- Tool Definitions ---
-# --- Tool Definitions ---
-
-#Testing client connection
-
 
 @tool()
 def call_mcp_server(query: str) -> str:
     """
    Use this tool to answer user questions by querying the MCP GraphQL server.
 
-   The input is the user's natural language question. You should convert it to a GraphQL query
-   internally before calling the MCP server.
+   The input is a valid GraphQL query string. The tool will send this query to the MCP server.
 
    Example:
-   User question: "How many messages were received for property 1234 in January 2024?"
-   Internally, you should convert this to a valid GraphQL query and send it to the MCP server.
+   User question: "Tell me about threads on propertyid 1234"
+   You should first use GraphQL introspection to understand the schema, then form a valid GraphQL query like:
+   `query { property(id: "1234") { threads { id title } } }` and pass it to this tool.
    """
 
     print(f"Calling MCP server with query: {query}")
@@ -45,21 +47,134 @@ def call_mcp_server(query: str) -> str:
         "Content-Type": "application/json",
     }
     payload = {
-        "query": query  # Pass the LLM's choosen query directly
+        "query": query
     }
     try:
-        response = requests.get(api_url, headers=headers, json=payload, auth=None) # Include authentication if needed
+        response = requests.post(api_url, headers=headers, json=payload, auth=None) # Changed to POST
         response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
 
-        # Process the response from the MCP server
-        mcp_response_data = response.json()  # Assuming the response is JSON
-
-        # Convert the response data to a string for the LLM
+        mcp_response_data = response.json()
         return str(mcp_response_data)
 
     except requests.exceptions.RequestException as e:
         print(f"Error calling MCP server: {e}")
         return f"Error communicating with MCP server: {e}"
+
+@tool()
+def get_mcp_graphql_schema() -> str:
+    """
+    Use this tool to get the GraphQL schema from the MCP server using introspection.
+    This should be called first to understand the available queries and types.
+    """
+    print("Performing GraphQL introspection on MCP server...")
+    api_url = f"{MCP_SERVER_URL}"
+    headers = {
+        "Content-Type": "application/json",
+    }
+    introspection_query = """
+        query IntrospectionQuery {
+            __schema {
+                queryType { name }
+                mutationType { name }
+                subscriptionType { name }
+                types {
+                    ...FullType
+                }
+                directives {
+                    name
+                    description
+                    locations
+                    args {
+                        ...InputValue
+                    }
+                }
+            }
+        }
+
+        fragment FullType on __Type {
+            kind
+            name
+            description
+            fields(includeDeprecated: true) {
+                name
+                description
+                args {
+                    ...InputValue
+                }
+                type {
+                    ...TypeRef
+                }
+                isDeprecated
+                deprecationReason
+            }
+            inputFields {
+                ...InputValue
+            }
+            interfaces {
+                ...TypeRef
+            }
+            enumValues(includeDeprecated: true) {
+                name
+                description
+                isDeprecated
+                deprecationReason
+            }
+            possibleTypes {
+                ...TypeRef
+            }
+        }
+
+        fragment InputValue on __InputValue {
+            name
+            description
+            type { ...TypeRef }
+            defaultValue
+        }
+
+        fragment TypeRef on __Type {
+            kind
+            name
+            ofType {
+                kind
+                name
+                ofType {
+                    kind
+                    name
+                    ofType {
+                        kind
+                        name
+                        ofType {
+                            kind
+                            name
+                            ofType {
+                                kind
+                                name
+                                ofType {
+                                    kind
+                                    name
+                                    ofType {
+                                        kind
+                                        name
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    """
+    payload = {
+        "query": introspection_query
+    }
+    try:
+        response = requests.post(api_url, headers=headers, json=payload, auth=None)
+        response.raise_for_status()
+        schema_data = response.json()
+        return str(schema_data)
+    except requests.exceptions.RequestException as e:
+        print(f"Error during introspection: {e}")
+        return f"Error performing introspection: {e}"
 
 # --- Dependency for OpenAI Client with Proxy ---
 
@@ -80,7 +195,7 @@ def get_langchain_chain(http_client: httpx.Client = Depends(get_openai_client)):
     """
     Provides the LangChain chain configured with the OpenAI model and tools.
     """
-    access_token = base64.b64encode(f"{PROXY_USERNAME}:{PROXY_PASSWORD}".encode('ascii')).decode('ascii')
+    access_token = base64.b64encode(f"{PROXY_USERNAME}:{PROXY_PASSWORD}".encode("ascii")).decode("ascii")
 
     custom_headers = {
         "x-client-app": PROXY_USERNAME
@@ -94,7 +209,7 @@ def get_langchain_chain(http_client: httpx.Client = Depends(get_openai_client)):
     )
 
     agent = initialize_agent(
-        tools=[call_mcp_server],
+        tools=[call_mcp_server, get_mcp_graphql_schema],
         llm=llm,
         agent=AgentType.OPENAI_FUNCTIONS,
         verbose=True,
@@ -110,17 +225,12 @@ class ResponseModel(BaseModel):
 @app.post("/generate_response", response_model=ResponseModel)
 async def generate_response(
         prompt: str,
-        # chain = Depends(get_langchain_chain),
         agent = Depends(get_langchain_chain)
 ):
     print(f"Received prompt: {prompt}")
     try:
-        # print("Test mcp")
         print(f"Hi here")
-        # response = chain.invoke({"input": prompt})
-
         response = agent.invoke({"input": prompt})
-        # Ensure the response is a string before returning
         return {"response": str(response)}
     except Exception as e:
         print(f"Error during response generation: {e}")
@@ -131,3 +241,5 @@ async def generate_response(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=5000)
+
+

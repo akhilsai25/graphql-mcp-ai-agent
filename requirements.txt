@@ -3,3 +3,15 @@ openai
 fastapi
 uvicorn
 requests
+
+langchain_openai
+
+
+
+langchain_community
+
+
+
+python-dotenv
+
+
