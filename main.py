@@ -7,6 +7,8 @@ from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI  # For chat models
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain_core.prompts import PromptTemplate
 
 # Load environment variables from .env file
 load_dotenv()
@@ -208,13 +210,22 @@ def get_langchain_chain(http_client: httpx.Client = Depends(get_openai_client)):
         default_headers=custom_headers,
     )
 
-    agent = initialize_agent(
-        tools=[call_mcp_server, get_mcp_graphql_schema],
-        llm=llm,
-        agent=AgentType.OPENAI_FUNCTIONS,
-        verbose=True,
-    )
-    return agent
+    tools = [call_mcp_server, get_mcp_graphql_schema]
+
+    # Define the prompt template
+    prompt = PromptTemplate.from_template("""
+    You are an AI assistant that interacts with a GraphQL server. 
+    Before attempting to query the server, you MUST use the 'get_mcp_graphql_schema' tool to understand the available schema. 
+    Once you have the schema, use it to formulate precise GraphQL queries for the 'call_mcp_server' tool.
+
+    Question: {input}
+    {agent_scratchpad}
+    """)
+
+    agent = create_react_agent(llm, tools, prompt)
+    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+
+    return agent_executor
 
 
 # --- FastAPI Setup ---
